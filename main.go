@@ -2,56 +2,92 @@ package main
 
 import (
 	"fmt"
-	"github.com/shirou/gopsutil/v3/cpu"
-	"github.com/shirou/gopsutil/v3/mem"
-	"io"
 	"log"
-	"net/http"
+	"os"
 	"runtime"
 	"strconv"
 	"time"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/monitor"
+	"github.com/shirou/gopsutil/v3/cpu"
+	"github.com/shirou/gopsutil/v3/mem"
 )
 
 var proxies Proxies
 
-func Index(w http.ResponseWriter, r *http.Request) {
-	io.WriteString(w, "/status 负载均衡状态\n\n/proxy 代理ip接口")
+func Index(c *fiber.Ctx) error {
+	return c.SendString("/status 负载均衡状态\n\n/dashboard 仪表盘 \n\n/proxy 从上游服务器抽取一条全新代理ip\n\n")
 }
 
-func Status(w http.ResponseWriter, r *http.Request) {
+func Status(c *fiber.Ctx) error {
 	v, _ := mem.VirtualMemory()
 	totalCpuPercent, _ := cpu.Percent(1*time.Second, false)
 	perCpuPercents, _ := cpu.Percent(1*time.Second, true)
-	io.WriteString(w, fmt.Sprintf("CPU总使用率: %.2f%%\n", totalCpuPercent[0]))
-	io.WriteString(w, fmt.Sprintf("CPU核心使用率: %.2v\n\n", perCpuPercents))
+	c.WriteString(fmt.Sprintf("CPU总使用率: %.2f%%\n", totalCpuPercent[0]))
+	c.WriteString(fmt.Sprintf("CPU核心使用率: %.2v\n\n", perCpuPercents))
 	memUsageStr := fmt.Sprintf("内存总计: %vM, 空闲:%vM, 使用率:%.2f%%\n\n", v.Total/1024/1024, v.Free/1024/1024, v.UsedPercent)
-	io.WriteString(w, memUsageStr)
-	io.WriteString(w, "代理 | 权重 | 代理地址\n")
+	c.WriteString(memUsageStr)
+	c.WriteString("代理 | 权重 | 代理地址\n")
 	for _, v := range proxies {
-		io.WriteString(w, v.Name+": "+strconv.Itoa(v.Weight)+" | "+v.Url+"\n")
+		c.WriteString(v.Name + ": " + strconv.Itoa(v.Weight) + " | " + v.Url + "\n")
 	}
+	return nil
 }
 
-func Redirect(writer http.ResponseWriter, request *http.Request) {
+func Redirect(c *fiber.Ctx) error {
 	//重定向
 	proxy := WeightedRandomProxy(proxies)
-	http.Redirect(writer, request, proxy.Url, http.StatusTemporaryRedirect)
+	c.Redirect(proxy.Url)
+	return nil
+}
+
+func RedirectQpsTest(c *fiber.Ctx) error {
+	//重定向
+	proxy := WeightedRandomProxy(proxies)
+	c.Redirect(proxy.Url, 200)
+	return nil
 }
 
 func main() {
-	port, worker, filename := clArgs()
-	fmt.Print("服务启动，使用-h命令查看帮助\n")
-	fmt.Print("http://127.0.0.1:"+strconv.Itoa(port)+"\n")
+	// 读取配置文件
+	port, multiprocess, filename := clArgs()
 	proxies = LoadJson("./" + filename)
-	if worker < 1 {
-		worker = runtime.NumCPU()
+	fiberConfig := fiber.Config{Prefork: multiprocess == 1, AppName: "ProxyBalancer", DisableDefaultDate: true, DisableStartupMessage: true}
+	monitorConfig := monitor.Config{
+		Title:      "服务器状态",
+		Refresh:    3 * time.Second,
+		APIOnly:    false,
+		Next:       nil,
+		FontURL:    "https://fonts.googleapis.com/css2?family=Roboto:wght@400;900&display=swap",
+		ChartJsURL: "https://cdn.jsdelivr.net/npm/chart.js@2.9/dist/Chart.bundle.min.js",
 	}
-	runtime.GOMAXPROCS(worker)
-	log.Printf("服务器端口%d", port)
-	log.Printf("线程数：%d", worker)
-	log.Printf("配置文件：%s", filename)
-	http.HandleFunc("/", Index)
-	http.HandleFunc("/status", Status)
-	http.HandleFunc("/proxy", Redirect)
-	http.ListenAndServe("0.0.0.0:"+strconv.Itoa(port), nil)
+	// 启动服务
+	app := fiber.New(fiberConfig)
+	app.Get("/", Index)
+	app.Get("/dashboard", monitor.New(monitorConfig))
+	app.Get("/status", Status)
+	app.Get("/proxy", Redirect)
+	app.Get("/proxytest", RedirectQpsTest)
+	app.Get("/test", func(c *fiber.Ctx) error {
+		fmt.Printf("ProcessId: %v, %v, isChild: %v\t", os.Getpid(), os.Getppid(), fiber.IsChild())
+		return c.SendStatus(200)
+	})
+	proxies = LoadJson("./" + filename)
+	if !fiber.IsChild() {
+		fmt.Print("服务启动，使用-h命令查看帮助\n")
+		url := "http://127.0.0.1:" + strconv.Itoa(port)
+		fmt.Print(url + "/dashboard\n")
+		fmt.Print(url + "/status\n")
+		fmt.Print(url + "/proxy\n")
+		worker := 1
+		if multiprocess == 1 {
+			worker = runtime.NumCPU()
+		}
+		// runtime.GOMAXPROCS(worker)
+		log.Printf("服务器端口%d", port)
+		log.Printf("进程数：%d", worker)
+		log.Printf("配置文件：%s", filename)
+	}
+	app.Listen("0.0.0.0:" + strconv.Itoa(port))
 }
