@@ -68,15 +68,10 @@ func main() {
 	app.Get("/dashboard", monitor.New(monitorConfig))
 	app.Get("/status", Status)
 	app.Get("/proxy", Redirect)
-	app.Get("/proxytest", RedirectQpsTest)
-	app.Get("/test", func(c *fiber.Ctx) error {
-		fmt.Printf("ProcessId: %v, %v, isChild: %v\t", os.Getpid(), os.Getppid(), fiber.IsChild())
-		return c.SendStatus(200)
-	})
 	proxies = LoadJson("./" + filename)
 	if !fiber.IsChild() {
 		fmt.Print("服务启动，使用-h命令查看帮助\n")
-		url := "http://127.0.0.1:" + strconv.Itoa(port)
+		url := "http://0.0.0.0:" + strconv.Itoa(port)
 		fmt.Print(url + "/dashboard\n")
 		fmt.Print(url + "/status\n")
 		fmt.Print(url + "/proxy\n")
